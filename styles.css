@@ -2266,12 +2266,42 @@ img {
 
   .system-card:not(.system-card-featured) .system-media,
   .system-card-featured .system-media {
+    display: grid;
+    grid-template-rows: 48px auto;
     min-height: auto;
-    aspect-ratio: 16 / 10;
+    aspect-ratio: auto;
   }
 
   .system-card-featured .system-media {
+    aspect-ratio: auto;
+  }
+
+  .system-media img {
+    grid-row: 2;
+    height: auto;
     aspect-ratio: 16 / 10;
+    border-top: 1px solid var(--line);
+  }
+
+  .system-media::after {
+    inset: 48px 0 0;
+  }
+
+  .system-media .card-number,
+  .system-media .status {
+    top: 13px;
+  }
+
+  .system-media .card-number {
+    left: 22px;
+  }
+
+  .system-media .status {
+    right: 14px;
+    max-width: calc(100% - 74px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .system-content {
