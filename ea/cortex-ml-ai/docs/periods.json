@@ -1,0 +1,40 @@
+[
+ {
+  "n": 1132,
+  "net": 1225.4,
+  "pf": 1.29,
+  "wr": 87.9,
+  "avg": 1.08,
+  "maxdd": 209.2,
+  "ret_dd": 5.86,
+  "r2": 0.839,
+  "mo_pos": "42/70",
+  "worst_mo": -94.7,
+  "label": "2021-01 .. 2026-10 (walk-forward OOS)",
+  "tp_exits": 55,
+  "sl_exits": 137,
+  "trail_exits": 940,
+  "avg_win": 5.42,
+  "avg_loss": -30.41,
+  "median_hold_min": 70.0
+ },
+ {
+  "n": 382,
+  "net": 818.9,
+  "pf": 1.67,
+  "wr": 89.8,
+  "avg": 2.14,
+  "maxdd": 106.0,
+  "ret_dd": 7.73,
+  "r2": 0.946,
+  "mo_pos": "12/18",
+  "worst_mo": -7.7,
+  "label": "last 18 months 2025-04-24 .. 2026-10-23",
+  "tp_exits": 33,
+  "sl_exits": 39,
+  "trail_exits": 310,
+  "avg_win": 5.93,
+  "avg_loss": -31.15,
+  "median_hold_min": 15.0
+ }
+]
