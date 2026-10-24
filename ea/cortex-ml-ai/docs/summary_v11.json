@@ -1,0 +1,134 @@
+{
+ "config": {
+  "core_k": 1.0,
+  "veto": 0.03,
+  "margin": 0.04,
+  "min_k": 0.6,
+  "margin2": 0.04,
+  "idle_days": 1.5,
+  "idle_span": 2.0,
+  "relax": 0.04,
+  "rec": "prop",
+  "K": 15.0,
+  "cap": 1.5,
+  "unit": 6.0
+ },
+ "variants": [
+  {
+   "policy": "v1.0 (main tier only, fixed lot)",
+   "trades": 1132,
+   "per_wk": 4.18,
+   "zero_wk%": 15.5,
+   "max_zero_wks": 3,
+   "net": 1225.0,
+   "pf": 1.29,
+   "maxdd": 209.0,
+   "ret/dd": 5.86,
+   "r2": 0.839,
+   "rec_trades": 30.0,
+   "avg_mult": 1.0
+  },
+  {
+   "policy": "v1.0 (main tier only, fixed lot) | last 18m",
+   "trades": 382,
+   "per_wk": 7.64,
+   "zero_wk%": 26.0,
+   "max_zero_wks": 3,
+   "net": 819.0,
+   "pf": 1.67,
+   "maxdd": 106.0,
+   "ret/dd": 7.73,
+   "r2": 0.946,
+   "rec_trades": 12.4,
+   "avg_mult": 1.0
+  },
+  {
+   "policy": "v1.1 activity (session tier + governor), fixed lot",
+   "trades": 1556,
+   "per_wk": 5.74,
+   "zero_wk%": 1.1,
+   "max_zero_wks": 1,
+   "net": 1560.0,
+   "pf": 1.27,
+   "maxdd": 145.0,
+   "ret/dd": 10.77,
+   "r2": 0.942,
+   "rec_trades": 28.6,
+   "avg_mult": 1.0
+  },
+  {
+   "policy": "v1.1 activity (session tier + governor), fixed lot | last 18m",
+   "trades": 510,
+   "per_wk": 10.2,
+   "zero_wk%": 0.0,
+   "max_zero_wks": 0,
+   "net": 889.0,
+   "pf": 1.49,
+   "maxdd": 118.0,
+   "ret/dd": 7.53,
+   "r2": 0.967,
+   "rec_trades": 14.5,
+   "avg_mult": 1.0
+  },
+  {
+   "policy": "v1.1 activity + smooth recovery (default)",
+   "trades": 1556,
+   "per_wk": 5.74,
+   "zero_wk%": 1.1,
+   "max_zero_wks": 1,
+   "net": 2252.0,
+   "pf": 1.31,
+   "maxdd": 173.0,
+   "ret/dd": 13.04,
+   "r2": 0.967,
+   "rec_trades": 19.6,
+   "avg_mult": 1.27
+  },
+  {
+   "policy": "v1.1 activity + smooth recovery (default) | last 18m",
+   "trades": 510,
+   "per_wk": 10.2,
+   "zero_wk%": 0.0,
+   "max_zero_wks": 0,
+   "net": 1140.0,
+   "pf": 1.53,
+   "maxdd": 154.0,
+   "ret/dd": 7.42,
+   "r2": 0.979,
+   "rec_trades": 11.8,
+   "avg_mult": 1.21
+  }
+ ],
+ "yearly": {
+  "2021": {
+   "trades": 220,
+   "net": 239.3,
+   "pf": 1.25
+  },
+  "2022": {
+   "trades": 246,
+   "net": 84.5,
+   "pf": 1.06
+  },
+  "2023": {
+   "trades": 220,
+   "net": 502.8,
+   "pf": 1.62
+  },
+  "2024": {
+   "trades": 275,
+   "net": 257.7,
+   "pf": 1.18
+  },
+  "2025": {
+   "trades": 161,
+   "net": 266.9,
+   "pf": 1.42
+  },
+  "2026": {
+   "trades": 434,
+   "net": 900.4,
+   "pf": 1.45
+  }
+ }
+}

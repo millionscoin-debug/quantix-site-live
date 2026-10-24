@@ -1,120 +1,69 @@
 //+------------------------------------------------------------------+
-//|                                                CortexML_AI.mq5   |
-//|        Cortex ML AI - XAUUSD intraday-momentum engine with an    |
-//|        online-learning logistic model and Adaptive Profit Shield |
+//|                                                 CortexCore.mqh   |
+//|  Platform-neutral core of Cortex ML AI (shared by MT5 and MT4).  |
+//|  The including expert must declare the inputs listed in the      |
+//|  README (same names in both platforms) before including this     |
+//|  file, and implement PlatformCountPositions().                   |
 //|                                         Quantix Engineering 2026 |
 //+------------------------------------------------------------------+
-#property copyright   "Quantix Engineering"
-#property link        "https://quantixengine.com"
-#property version     "1.00"
-#property description "Cortex ML AI: trades XAUUSD in the direction of strong intraday moves."
-#property description "An online logistic model (re-trained every month on the broker's own history"
-#property description "plus the EA's real results) vetoes weak core signals and adds confident ones."
-#property description "Hard SL $30, TP $12-15, Adaptive Profit Shield trailing that never locks less than $3."
-
-#include <Trade\Trade.mqh>
-
-//--- number of model features (must match the research pipeline: research/features.py)
+#define CORTEX_VERSION "1.10"
+//--- number of model features (must match research/features.py)
 #define NF 67
+//--- model slots: 0 = day-momentum tier (core + ML tier), 1 = session tier
+#define NMODELS 2
 
-enum ENUM_LOT_MODE
-  {
-   LOT_FIXED        = 0,   // Fixed lot
-   LOT_PER_BALANCE  = 1,   // 0.01 lot per N of balance
-   LOT_RISK_PERCENT = 2    // % of balance lost at the hard stop
-  };
-
-enum ENUM_TP_MODE
-  {
-   TP_FIXED    = 0,        // Fixed take profit
-   TP_ADAPTIVE = 1         // Adaptive 12..15 by H1 volatility
-  };
-
-enum ENUM_TRAIL_PROFILE
-  {
-   TRAIL_SHIELD   = 0,     // Shield: start +5, lock +4, distance 3 (researched default)
-   TRAIL_BALANCED = 1,     // Balanced: start +6, lock +4, distance 3
-   TRAIL_RUNNER   = 2,     // Runner: start +8, lock +5, distance 3
-   TRAIL_CUSTOM   = 3,     // Custom values below
-   TRAIL_OFF      = 4      // Off (pure TP / SL)
-  };
-
-//--- inputs
-input group "=== Money management ==="
-input ENUM_LOT_MODE      InpLotMode          = LOT_FIXED;   // Lot mode
-input double             InpFixedLot         = 0.01;        // Fixed lot
-input double             InpBalancePer001    = 1000.0;      // Balance per 0.01 lot (per-balance mode)
-input double             InpRiskPercent      = 1.0;         // Risk % at hard stop (risk mode)
-input double             InpMaxLot           = 5.0;         // Maximum lot
-
-input group "=== Exits (USD of XAUUSD price = USD per 0.01 lot) ==="
-input double             InpStopLossUSD      = 30.0;        // Hard stop loss
-input ENUM_TP_MODE       InpTPMode           = TP_FIXED;    // Take profit mode
-input double             InpTakeProfitUSD    = 13.5;        // Fixed take profit
-input double             InpTPMinUSD         = 12.0;        // Adaptive TP minimum
-input double             InpTPMaxUSD         = 15.0;        // Adaptive TP maximum
-
-input group "=== Adaptive Profit Shield (trailing) ==="
-input ENUM_TRAIL_PROFILE InpTrailProfile     = TRAIL_SHIELD;// Trailing profile
-input double             InpTrailStartUSD    = 5.0;         // Custom: activation profit
-input double             InpTrailLockUSD     = 4.0;         // Custom: profit locked at activation (>= 3)
-input double             InpTrailDistUSD     = 3.0;         // Custom: distance from the peak
-input double             InpTightenAt        = 0.8;         // Tighten when profit >= this share of TP
-input double             InpTightenK         = 0.6;         // Distance multiplier near TP
-input double             InpTrailStepUSD     = 0.5;         // Minimal SL improvement per modification
-
-input group "=== Signal engine: intraday momentum ==="
-input double             InpCoreDayMove      = 1.0;         // Core signal: day move >= x daily ATR
-input double             InpMinDayMove       = 0.6;         // ML tier: day move >= x daily ATR
-input int                InpHourFrom         = 8;           // First entry hour (NY+7 server clock)
-input int                InpHourTo           = 23;          // Entries until hour (exclusive)
-input int                InpMaxPositions     = 1;           // Max simultaneous positions
-input int                InpMinMinutesGap    = 0;           // Min minutes between entries (0 = off)
-input int                InpFridayLastHour   = 23;          // No new entries on Friday from hour
-
-input group "=== Machine learning core ==="
-input bool               InpUseML            = true;        // Use the ML model
-input double             InpTrainYears       = 3.0;         // Rolling training window (years)
-input int                InpMinSamples       = 300;         // Min labelled samples to activate the model
-input double             InpRegC             = 0.05;        // Inverse L2 strength (C)
-input double             InpCoreVeto         = 0.03;        // Core veto: skip if p < base - veto
-input double             InpMLMargin         = 0.04;        // ML tier: take if p > base + margin
-input double             InpLabelSpreadUSD   = 0.25;        // Spread assumed when labelling history
-input double             InpCommissionPerLot = 7.0;         // Round-turn commission per 1.0 lot
-input bool               InpLearnFromTrades  = true;        // Feed real trade results back into the data
-input bool               InpPersistMemory    = true;        // Live: keep samples/feedback in Common files
-
-input group "=== Protection ==="
-input double             InpMaxSpreadUSD     = 0.80;        // Max spread at entry
-input double             InpDailyLossPct     = 0.0;         // Daily loss limit % (0 = off)
-input double             InpEquityStopPct    = 0.0;         // Stop trading below this % drawdown (0 = off)
-
-input group "=== Server clock ==="
-input int                InpServerGMTWinter  = 2;           // Broker GMT offset in winter
-input bool               InpServerUsDst      = true;        // Broker follows US daylight saving
-
-input group "=== General ==="
-input long               InpMagic            = 20261024;    // Magic number
-input string             InpComment          = "CortexML";  // Order comment
-input datetime           InpTradeStart       = D'2000.01.01';// No trading before (tester warm-up)
-input bool               InpShowPanel        = true;        // Show info panel
-input bool               InpVerbose          = false;       // Verbose log
-
-//--- forward declarations
-bool Train();
+//--- implemented by the platform wrapper
+int  PlatformCountPositions();
+//--- forward declarations inside the core
 void SaveMemory();
-void LoadMemory();
-
-//--- trade-management constants derived from the inputs
-double g_act, g_lock, g_dist;
-bool   g_trailOn;
+bool Train();
 
 //+------------------------------------------------------------------+
-//| Time helpers: everything is computed on the "NY+7" clock         |
+//| Trade-management constants derived from the inputs               |
+//+------------------------------------------------------------------+
+double g_act = 5.0, g_lock = 4.0, g_dist = 3.0;
+bool   g_trailOn = true;
+
+bool CoreSetupShield()
+  {
+   switch(InpTrailProfile)
+     {
+      case TRAIL_SHIELD:
+         g_act = 5.0;
+         g_lock = 4.0;
+         g_dist = 3.0;
+         break;
+      case TRAIL_BALANCED:
+         g_act = 6.0;
+         g_lock = 4.0;
+         g_dist = 3.0;
+         break;
+      case TRAIL_RUNNER:
+         g_act = 8.0;
+         g_lock = 5.0;
+         g_dist = 3.0;
+         break;
+      default:
+         g_act = InpTrailStartUSD;
+         g_lock = MathMax(3.0, InpTrailLockUSD);
+         g_dist = InpTrailDistUSD;
+     }
+   g_trailOn = (InpTrailProfile != TRAIL_OFF);
+   if(g_trailOn && g_lock >= g_act)
+     {
+      Print("CortexML: trailing lock must be below the activation profit");
+      return(false);
+     }
+   return(InpStopLossUSD > 0 && InpTakeProfitUSD > 0 && InpTPMinUSD <= InpTPMaxUSD);
+  }
+
+//+------------------------------------------------------------------+
+//| Time helpers: features are computed on the "NY+7" clock          |
 //| (UTC+2 winter / UTC+3 US summer), the clock of IC Markets & co.  |
 //+------------------------------------------------------------------+
 int      g_dstYear = -1;
 datetime g_dstFrom = 0, g_dstTo = 0;
+bool     g_shiftZero = true;
 
 bool IsUsDst(datetime t)
   {
@@ -134,8 +83,6 @@ bool IsUsDst(datetime t)
    return(t >= g_dstFrom && t < g_dstTo);
   }
 
-bool g_shiftZero = true;
-
 datetime ToNY7(datetime serverTime)
   {
    if(g_shiftZero)
@@ -148,6 +95,13 @@ datetime ToNY7(datetime serverTime)
 
 long DayKey(datetime t) { return((long)t / 86400); }
 
+double ClockHour(datetime t)
+  {
+   MqlDateTime s;
+   TimeToStruct(t, s);
+   return(s.hour + s.min / 60.0);
+  }
+
 //+------------------------------------------------------------------+
 //| Bar series with the indicator set of research/features.tf_block  |
 //+------------------------------------------------------------------+
@@ -159,8 +113,9 @@ public:
    datetime          t[];
    double            o[], h[], l[], c[];
    double            atr[], e20[], e50[], e200[], rsi[], rsif[], m20[], s20[], hh[], ll[], er[], atrma[];
-   //--- intraday helpers (used by the signal timeframe only)
    double            dayOpen[], dayHigh[], dayLow[];
+
+                     CTF() { n = 0; dur = 60; }
 
    void              Reset(int durSec)
      {
@@ -188,7 +143,6 @@ public:
       n++;
      }
 
-   //--- merge a bar into the last one (used when aggregating H1 -> H4 / D1)
    void              Merge(double hi, double lo, double cc)
      {
       if(hi > h[n - 1])
@@ -436,7 +390,6 @@ void Aggregate(CTF &h1, CTF &dst, int durSec)
      }
   }
 
-//--- the four timeframes used by the model
 CTF g_m15, g_h1, g_h4, g_d1;   // live window
 CTF t_m15, t_h1, t_h4, t_d1;   // training history
 CTF t_path;                    // M1 (+ M5 fallback) path for labelling
@@ -463,9 +416,9 @@ bool LoadPath(datetime from, datetime to)
   {
    CTF m1, m5;
    bool ok1 = LoadTF(PERIOD_M1, from, to, m1, 60);
-   datetime m1Start = (ok1 && m1.n > 0) ? m1.t[0] : to;
+   datetime m1Start = (ok1 && m1.n > 0) ? m1.t[0] : ToNY7(to);
    t_path.Reset(60);
-   if(m1Start > from + 86400)
+   if(m1Start > ToNY7(from) + 86400)
      {
       if(LoadTF(PERIOD_M5, from, to, m5, 300))
          for(int i = 0; i < m5.n && m5.t[i] < m1Start; i++)
@@ -474,6 +427,10 @@ bool LoadPath(datetime from, datetime to)
    if(ok1)
       for(int i = 0; i < m1.n; i++)
          t_path.Add(m1.t[i], m1.o[i], m1.h[i], m1.l[i], m1.c[i]);
+   //--- never label on a bar that is still forming (MT4 tester may expose the whole minute)
+   datetime nowNY = ToNY7(TimeCurrent());
+   while(t_path.n > 0 && t_path.t[t_path.n - 1] + 60 > nowNY)
+      t_path.n--;
    return(t_path.n > 1000);
   }
 
@@ -513,11 +470,21 @@ bool DayMove(CTF &m15, CTF &d1, int i, double &dm)
    return(true);
   }
 
-double ServerHour(datetime t)
+//--- raw 6h / 24h H1 moves in H1 ATR (session tier trigger)
+bool SessionMoves(CTF &m15, CTF &h1, int i, double &r6, double &r24)
   {
-   MqlDateTime s;
-   TimeToStruct(t, s);
-   return(s.hour + s.min / 60.0);
+   int jh = h1.LastClosed(m15.t[i] + 900);
+   double v[19];
+   if(jh < 112 || !h1.Block(jh, v))
+      return(false);
+   r6 = v[2];
+   r24 = v[4];
+   return(true);
+  }
+
+bool SessionTrigger(double r6, double r24, int dir)
+  {
+   return(dir * r6 > InpSessMove6 || dir * r24 > InpSessMove24);
   }
 
 bool MakeFeatures(CTF &m15, CTF &h1, CTF &h4, CTF &d1, int i, int dir, double &x[], double &tpUsed)
@@ -592,7 +559,7 @@ bool MakeFeatures(CTF &m15, CTF &h1, CTF &h4, CTF &d1, int i, int dir, double &x
    x[p++] = tpUsed / ha;
    x[p++] = InpStopLossUSD / ha;
    x[p++] = sa / ha;
-   x[p++] = ServerHour(m15.t[i]);
+   x[p++] = ClockHour(m15.t[i]);
    MqlDateTime s;
    TimeToStruct(m15.t[i], s);
    x[p++] = (s.day_of_week + 6) % 7;     // Monday = 0 like pandas
@@ -676,9 +643,8 @@ bool Leg(int dir, double p0, double p1, double entry, double &slv, double tpv, d
    return(false);
   }
 
-SimResult SimTrade(CTF &path, int i0, int dir, double tpDist)
+void SimTrade(CTF &path, int i0, int dir, double tpDist, SimResult &r)
   {
-   SimResult r;
    double spr  = InpLabelSpreadUSD;
    double comm = InpCommissionPerLot / 100.0;      // per 0.01 lot
    double q = (dir > 0) ? 0.0 : spr;               // exit-side quote offset
@@ -687,6 +653,7 @@ SimResult SimTrade(CTF &path, int i0, int dir, double tpDist)
    double hard = slv;
    double tpv = entry + dir * tpDist;
    double peak = entry;
+   double pts[4];
    for(int i = i0; i < path.n; i++)
      {
       double oo = path.o[i] + q, hh = path.h[i] + q, ll = path.l[i] + q, cc = path.c[i] + q;
@@ -697,22 +664,19 @@ SimResult SimTrade(CTF &path, int i0, int dir, double tpDist)
             r.pnl = dir * (oo - entry) - comm;
             r.exitIdx = i;
             r.reason = (slv == hard) ? 2 : 3;
-            return(r);
+            return;
            }
          if((dir > 0 && oo >= tpv) || (dir < 0 && oo <= tpv))
            {
             r.pnl = dir * (oo - entry) - comm;
             r.exitIdx = i;
             r.reason = 1;
-            return(r);
+            return;
            }
         }
-      double a1 = (cc >= oo) ? ll : hh;
-      double a2 = (cc >= oo) ? hh : ll;
-      double pts[4];
       pts[0] = oo;
-      pts[1] = a1;
-      pts[2] = a2;
+      pts[1] = (cc >= oo) ? ll : hh;
+      pts[2] = (cc >= oo) ? hh : ll;
       pts[3] = cc;
       for(int k = 0; k < 3; k++)
         {
@@ -722,14 +686,48 @@ SimResult SimTrade(CTF &path, int i0, int dir, double tpDist)
             r.pnl = dir * (px - entry) - comm;
             r.exitIdx = i;
             r.reason = (px == tpv) ? 1 : ((slv == hard) ? 2 : 3);
-            return(r);
+            return;
            }
         }
      }
    r.pnl = dir * (path.c[path.n - 1] + q - entry) - comm;
    r.exitIdx = path.n - 1;
    r.reason = 5;
-   return(r);
+  }
+
+//--- Adaptive Profit Shield for a live position: returns the new stop or 0 (no change)
+double ShieldNewSL(bool isBuy, double open, double sl, double tp, double bid, double ask, double &peak, double stopLvl)
+  {
+   if(!g_trailOn)
+      return(0);
+   double tpDist = (tp > 0) ? MathAbs(tp - open) : InpTakeProfitUSD;
+   if(isBuy)
+     {
+      if(bid > peak)
+         peak = bid;
+      double prof = peak - open;
+      if(prof < g_act)
+         return(0);
+      double d = (prof >= InpTightenAt * tpDist) ? g_dist * InpTightenK : g_dist;
+      double ns = MathMax(peak - d, open + g_lock);
+      ns = MathMin(ns, bid - stopLvl);
+      ns = NormalizeDouble(ns, _Digits);
+      if(ns >= sl + InpTrailStepUSD - 1e-9 && ns > open)
+         return(ns);
+      return(0);
+     }
+   if(ask < peak)
+      peak = ask;
+   double prof = open - peak;
+   if(prof < g_act)
+      return(0);
+   double d = (prof >= InpTightenAt * tpDist) ? g_dist * InpTightenK : g_dist;
+   double ns = MathMin(peak + d, open - g_lock);
+   ns = MathMax(ns, ask + stopLvl);
+   ns = NormalizeDouble(ns, _Digits);
+   if((sl <= 0 || ns <= sl - InpTrailStepUSD + 1e-9) && ns < open)
+      return(ns);
+   return(0);
   }
 
 //+------------------------------------------------------------------+
@@ -740,6 +738,7 @@ struct Sample
    datetime          t;        // signal bar start (NY+7 clock)
    datetime          te;       // exit time of the (simulated or real) trade
    int               dir;
+   int               tier;     // 0 day-momentum, 1 session
    double            dm;       // day move in the trade direction (daily ATR)
    double            pnl;      // $ per 0.01 lot
    int               real;     // 1 = label comes from a real trade of this EA
@@ -759,31 +758,65 @@ int      g_nS = 0;
 Feedback g_F[];
 int      g_nF = 0;
 
-//--- model
-double   g_mu[NF], g_sd[NF], g_w[NF];
-double   g_b = 0, g_base = 0;
-bool     g_modelOk = false;
-int      g_trainN = 0;
+//--- models
+double   g_mu[NMODELS][NF], g_sd[NMODELS][NF], g_w[NMODELS][NF];
+double   g_b[NMODELS], g_base[NMODELS];
+bool     g_modelOk[NMODELS];
+int      g_trainN[NMODELS];
 datetime g_trainedAt = 0;
 int      g_trainMonth = -1;
-double   g_trainAcc = 0;
 
-//--- runtime
-datetime g_lastBar = 0;
+//--- runtime state shared with the wrappers
 datetime g_lastEntry = 0;
-double   g_lastP = -1, g_lastE = 0, g_lastDM = 0;
-int      g_lastDir = 0;
+double   g_lastP = -1, g_lastE = 0, g_lastDM = 0, g_lastMult = 1.0;
 string   g_lastDecision = "waiting for the first closed bar";
-double   g_dayStartBalance = 0;
-int      g_dayKey = -1;
-double   g_peakEquity = 0;
+double   g_eaPnl = 0, g_eaHwm = 0;     // realised P/L of this EA (money) and its high-water mark
 
+//--- positions opened by this EA (ticket / position id -> signal) for trailing peaks and feedback
 ulong    g_posTicket[];
 double   g_posPeak[];
 datetime g_posSigT[];
 int      g_posSigDir[];
 
-CTrade   trade;
+void RememberPosition(ulong ticket, double peak, datetime sigT, int sigDir)
+  {
+   int n = ArraySize(g_posTicket);
+   for(int i = 0; i < n; i++)
+      if(g_posTicket[i] == ticket)
+         return;
+   ArrayResize(g_posTicket, n + 1);
+   ArrayResize(g_posPeak, n + 1);
+   ArrayResize(g_posSigT, n + 1);
+   ArrayResize(g_posSigDir, n + 1);
+   g_posTicket[n] = ticket;
+   g_posPeak[n] = peak;
+   g_posSigT[n] = sigT;
+   g_posSigDir[n] = sigDir;
+  }
+
+int PosIndex(ulong ticket)
+  {
+   for(int i = ArraySize(g_posTicket) - 1; i >= 0; i--)
+      if(g_posTicket[i] == ticket)
+         return(i);
+   return(-1);
+  }
+
+void ForgetPosition(ulong ticket)
+  {
+   int k = PosIndex(ticket);
+   int n = ArraySize(g_posTicket);
+   if(k < 0)
+      return;
+   g_posTicket[k] = g_posTicket[n - 1];
+   g_posPeak[k] = g_posPeak[n - 1];
+   g_posSigT[k] = g_posSigT[n - 1];
+   g_posSigDir[k] = g_posSigDir[n - 1];
+   ArrayResize(g_posTicket, n - 1);
+   ArrayResize(g_posPeak, n - 1);
+   ArrayResize(g_posSigT, n - 1);
+   ArrayResize(g_posSigDir, n - 1);
+  }
 
 //+------------------------------------------------------------------+
 //| Logistic regression with L2 (Newton / IRLS), = sklearn lbfgs fit |
@@ -839,7 +872,7 @@ double Sigmoid(double z)
    return(1.0 / (1.0 + MathExp(-z)));
   }
 
-bool FitLogistic(const double &Z[], const double &Y[], int N)
+bool FitLogistic(int m, const double &Z[], const double &Y[], int N)
   {
    int d = NF + 1;
    double lambda = 1.0 / MathMax(InpRegC, 1e-6);
@@ -875,8 +908,8 @@ bool FitLogistic(const double &Z[], const double &Y[], int N)
             G[k] += r * zk;
             double wz = w * zk;
             int row = k * d;
-            for(int m = 0; m <= k; m++)
-               H[row + m] += wz * Z[off + m];
+            for(int c = 0; c <= k; c++)
+               H[row + c] += wz * Z[off + c];
             H[row + NF] += wz;
            }
          G[NF] += r;
@@ -891,8 +924,8 @@ bool FitLogistic(const double &Z[], const double &Y[], int N)
       //--- symmetrise (lower triangle filled above, bias column stored in row k)
       for(int k = 0; k < NF; k++)
         {
-         for(int m = 0; m < k; m++)
-            H[m * d + k] = H[k * d + m];
+         for(int c = 0; c < k; c++)
+            H[c * d + k] = H[k * d + c];
          H[NF * d + k] = H[k * d + NF];
         }
       if(!Cholesky(H, d))
@@ -908,27 +941,27 @@ bool FitLogistic(const double &Z[], const double &Y[], int N)
          break;
      }
    for(int k = 0; k < NF; k++)
-      g_w[k] = W[k];
-   g_b = W[NF];
+      g_w[m][k] = W[k];
+   g_b[m] = W[NF];
    return(true);
   }
 
-double Predict(const double &x[])
+double Predict(int m, const double &x[])
   {
-   if(!g_modelOk)
+   if(!g_modelOk[m])
       return(-1);
-   double eta = g_b;
+   double eta = g_b[m];
    for(int k = 0; k < NF; k++)
      {
-      double z = (x[k] - g_mu[k]) / g_sd[k];
+      double z = (x[k] - g_mu[m][k]) / g_sd[m][k];
       z = MathMax(-4.0, MathMin(4.0, z));
-      eta += g_w[k] * z;
+      eta += g_w[m][k] * z;
      }
    return(Sigmoid(eta));
   }
 
 //+------------------------------------------------------------------+
-//| Build the labelled dataset from history and train                |
+//| Build the labelled dataset from history and train both models    |
 //+------------------------------------------------------------------+
 int FindSample(datetime t, int dir)
   {
@@ -952,6 +985,27 @@ void ApplyFeedback()
      }
   }
 
+bool InTradingHours(datetime barStart)
+  {
+   double hr = ClockHour(barStart);
+   return(hr >= InpHourFrom && hr < InpHourTo);
+  }
+
+void AddBuilt(Sample &arr[], int &nb, datetime t, datetime te, int dir, int tier, double dm, double pnl, const double &x[])
+  {
+   ArrayResize(arr, nb + 1, 20000);
+   arr[nb].t = t;
+   arr[nb].te = te;
+   arr[nb].dir = dir;
+   arr[nb].tier = tier;
+   arr[nb].dm = dm;
+   arr[nb].pnl = pnl;
+   arr[nb].real = 0;
+   for(int k = 0; k < NF; k++)
+      arr[nb].x[k] = x[k];
+   nb++;
+  }
+
 int BuildFromHistory(datetime from, datetime to)
   {
    if(!LoadSet(from, to, t_m15, t_h1, t_h4, t_d1))
@@ -963,41 +1017,49 @@ int BuildFromHistory(datetime from, datetime to)
    ArrayResize(built, 0, 20000);
    double x[NF];
    datetime nowNY = ToNY7(TimeCurrent());
+   SimResult r;
    for(int i = 112; i < t_m15.n - 1; i++)
      {
-      double hr = ServerHour(t_m15.t[i]);
-      if(hr < InpHourFrom || hr >= InpHourTo)
+      if(!InTradingHours(t_m15.t[i]))
          continue;
       double dmRaw = 0;
       if(!DayMove(t_m15, t_d1, i, dmRaw))
-         continue;
-      int dir = (dmRaw > 0) ? 1 : -1;
-      double dm = MathAbs(dmRaw);
-      if(dm <= InpMinDayMove)
-         continue;
-      double tpUsed = InpTakeProfitUSD;
-      if(!MakeFeatures(t_m15, t_h1, t_h4, t_d1, i, dir, x, tpUsed))
          continue;
       datetime e = t_m15.t[i] + 900;
       int i0 = t_path.FirstAtOrAfter(e);
       if(i0 < 0 || t_path.t[i0] - e >= 3600)
          continue;
-      SimResult r = SimTrade(t_path, i0, dir, tpUsed);
-      if(r.reason == 5)
-         continue;                             // still open at the end of the data
-      datetime te = t_path.t[r.exitIdx];
-      if(te >= nowNY)
-         continue;
-      ArrayResize(built, nb + 1, 20000);
-      built[nb].t = t_m15.t[i];
-      built[nb].te = te;
-      built[nb].dir = dir;
-      built[nb].dm = dm;
-      built[nb].pnl = r.pnl;
-      built[nb].real = 0;
-      for(int k = 0; k < NF; k++)
-         built[nb].x[k] = x[k];
-      nb++;
+      int dirs[2];
+      int nd = 0, tier = 0;
+      if(MathAbs(dmRaw) > InpMinDayMove)
+         dirs[nd++] = (dmRaw > 0) ? 1 : -1;
+      else
+        {
+         if(!InpUseSessionTier)
+            continue;
+         double r6 = 0, r24 = 0;
+         if(!SessionMoves(t_m15, t_h1, i, r6, r24))
+            continue;
+         tier = 1;
+         if(SessionTrigger(r6, r24, -1))
+            dirs[nd++] = -1;
+         if(SessionTrigger(r6, r24, 1))
+            dirs[nd++] = 1;
+        }
+      for(int q = 0; q < nd; q++)
+        {
+         int dir = dirs[q];
+         double tpUsed = InpTakeProfitUSD;
+         if(!MakeFeatures(t_m15, t_h1, t_h4, t_d1, i, dir, x, tpUsed))
+            continue;
+         SimTrade(t_path, i0, dir, tpUsed, r);
+         if(r.reason == 5)
+            continue;                          // still open at the end of the data
+         datetime te = t_path.t[r.exitIdx];
+         if(te >= nowNY)
+            continue;
+         AddBuilt(built, nb, t_m15.t[i], te, dir, tier, dir * dmRaw, r.pnl, x);
+        }
      }
    //--- merge: keep remembered samples older than what history could rebuild
    datetime firstBuilt = (nb > 0) ? built[0].t : ToNY7(to);
@@ -1026,6 +1088,60 @@ int BuildFromHistory(datetime from, datetime to)
    return(nb);
   }
 
+bool TrainModel(int m)
+  {
+   int N = 0;
+   for(int i = 0; i < g_nS; i++)
+      if(g_S[i].tier == m)
+         N++;
+   g_trainN[m] = N;
+   if(!InpUseML || N < InpMinSamples)
+     {
+      g_modelOk[m] = false;
+      return(false);
+     }
+   double Z[], Y[];
+   ArrayResize(Z, N * NF);
+   ArrayResize(Y, N);
+   int idx[];
+   ArrayResize(idx, N);
+   int q = 0;
+   for(int i = 0; i < g_nS; i++)
+      if(g_S[i].tier == m)
+         idx[q++] = i;
+   for(int k = 0; k < NF; k++)
+     {
+      double mean = 0, var = 0;
+      for(int j = 0; j < N; j++)
+         mean += g_S[idx[j]].x[k];
+      mean /= N;
+      for(int j = 0; j < N; j++)
+         var += (g_S[idx[j]].x[k] - mean) * (g_S[idx[j]].x[k] - mean);
+      g_mu[m][k] = mean;
+      g_sd[m][k] = MathSqrt(var / N) + 1e-9;
+     }
+   double wins = 0;
+   for(int j = 0; j < N; j++)
+     {
+      int i = idx[j];
+      Y[j] = (g_S[i].pnl > 0) ? 1.0 : 0.0;
+      wins += Y[j];
+      for(int k = 0; k < NF; k++)
+        {
+         double z = (g_S[i].x[k] - g_mu[m][k]) / g_sd[m][k];
+         Z[j * NF + k] = MathMax(-4.0, MathMin(4.0, z));
+        }
+     }
+   g_base[m] = wins / N;
+   if(!FitLogistic(m, Z, Y, N))
+     {
+      PrintFormat("CortexML: logistic fit failed for model %d, keeping the previous one", m);
+      return(false);
+     }
+   g_modelOk[m] = true;
+   return(true);
+  }
+
 bool Train()
   {
    uint t0 = GetTickCount();
@@ -1038,69 +1154,15 @@ bool Train()
          Print("CortexML: history not ready (", nb, ")");
       return(false);
      }
-   int N = g_nS;
    MqlDateTime s;
    TimeToStruct(now, s);
    g_trainMonth = s.year * 12 + s.mon;
-   if(!InpUseML || N < InpMinSamples)
-     {
-      g_modelOk = false;
-      g_trainN = N;
-      PrintFormat("CortexML: %d labelled samples (< %d) -> core rule only until enough history", N, InpMinSamples);
-      return(true);
-     }
-   double Z[], Y[];
-   ArrayResize(Z, N * NF);
-   ArrayResize(Y, N);
-   double wins = 0;
-   for(int k = 0; k < NF; k++)
-     {
-      double m = 0, v = 0;
-      for(int i = 0; i < N; i++)
-         m += g_S[i].x[k];
-      m /= N;
-      for(int i = 0; i < N; i++)
-         v += (g_S[i].x[k] - m) * (g_S[i].x[k] - m);
-      g_mu[k] = m;
-      g_sd[k] = MathSqrt(v / N) + 1e-9;
-     }
-   for(int i = 0; i < N; i++)
-     {
-      Y[i] = (g_S[i].pnl > 0) ? 1.0 : 0.0;
-      wins += Y[i];
-      for(int k = 0; k < NF; k++)
-        {
-         double z = (g_S[i].x[k] - g_mu[k]) / g_sd[k];
-         Z[i * NF + k] = MathMax(-4.0, MathMin(4.0, z));
-        }
-     }
-   g_base = wins / N;
-   if(!FitLogistic(Z, Y, N))
-     {
-      Print("CortexML: logistic fit failed, keeping the previous model");
-      return(false);
-     }
-   g_modelOk = true;
-   g_trainN = N;
    g_trainedAt = now;
-   //--- in-sample accuracy of the "take" decision (diagnostic only)
-   double hit = 0, cnt = 0;
-   double xx[NF];
-   for(int i = 0; i < N; i++)
-     {
-      for(int k = 0; k < NF; k++)
-         xx[k] = g_S[i].x[k];
-      double p = Predict(xx);
-      bool take = (g_S[i].dm >= InpCoreDayMove) ? (p > g_base - InpCoreVeto) : (p > g_base + InpMLMargin);
-      if(take)
-        {
-         cnt++;
-         hit += Y[i];
-        }
-     }
-   g_trainAcc = (cnt > 0) ? hit / cnt : 0;
-   PrintFormat("CortexML: model trained on %d samples (%d fresh), base win %.1f%%, selected win %.1f%% on %d, %u ms",
-               N, nb, 100 * g_base, 100 * g_trainAcc, (int)cnt, GetTickCount() - t0);
+   for(int m = 0; m < NMODELS; m++)
+      TrainModel(m);
+   PrintFormat("CortexML %s: trained on %d samples (%d fresh). day-tier model %s n=%d base %.1f%% | session model %s n=%d base %.1f%% | %u ms",
+               CORTEX_VERSION, g_nS, nb, g_modelOk[0] ? "ON" : "off", g_trainN[0], 100 * g_base[0],
+               g_modelOk[1] ? "ON" : "off", g_trainN[1], 100 * g_base[1], GetTickCount() - t0);
    SaveMemory();
    return(true);
   }
@@ -1109,7 +1171,7 @@ bool Train()
 //| Persistence (live only; the tester always learns from scratch)   |
 //+------------------------------------------------------------------+
 bool UseFiles() { return(InpPersistMemory && !MQLInfoInteger(MQL_TESTER) && !MQLInfoInteger(MQL_OPTIMIZATION)); }
-string MemFile(string kind) { return("CortexML\\" + _Symbol + "_" + IntegerToString(InpMagic) + "_" + kind + ".bin"); }
+string MemFile(string kind) { return("CortexML\\" + _Symbol + "_" + IntegerToString(InpMagic) + "_" + kind + "_v2.bin"); }
 
 void SaveMemory()
   {
@@ -1119,13 +1181,15 @@ void SaveMemory()
    if(h != INVALID_HANDLE)
      {
       FileWriteInteger(h, NF);
-      FileWriteArray(h, g_S, 0, g_nS);
+      if(g_nS > 0)
+         FileWriteArray(h, g_S, 0, g_nS);
       FileClose(h);
      }
    h = FileOpen(MemFile("feedback"), FILE_WRITE | FILE_BIN | FILE_COMMON);
    if(h != INVALID_HANDLE)
      {
-      FileWriteArray(h, g_F, 0, g_nF);
+      if(g_nF > 0)
+         FileWriteArray(h, g_F, 0, g_nF);
       FileClose(h);
      }
   }
@@ -1134,11 +1198,12 @@ void LoadMemory()
   {
    if(!UseFiles())
       return;
+   FolderCreate("CortexML", FILE_COMMON);
    int h = FileOpen(MemFile("samples"), FILE_READ | FILE_BIN | FILE_COMMON);
    if(h != INVALID_HANDLE)
      {
       int nf = FileReadInteger(h);
-      if(nf == NF)
+      if(nf == NF && !FileIsEnding(h))
         {
          g_nS = (int)FileReadArray(h, g_S);
          if(g_nS < 0)
@@ -1149,9 +1214,12 @@ void LoadMemory()
    h = FileOpen(MemFile("feedback"), FILE_READ | FILE_BIN | FILE_COMMON);
    if(h != INVALID_HANDLE)
      {
-      g_nF = (int)FileReadArray(h, g_F);
-      if(g_nF < 0)
-         g_nF = 0;
+      if(!FileIsEnding(h))
+        {
+         g_nF = (int)FileReadArray(h, g_F);
+         if(g_nF < 0)
+            g_nF = 0;
+        }
       FileClose(h);
      }
    if(g_nS > 0 || g_nF > 0)
@@ -1159,22 +1227,41 @@ void LoadMemory()
   }
 
 //+------------------------------------------------------------------+
-//| Trading helpers                                                  |
+//| Real trade results -> learning feedback and recovery state       |
 //+------------------------------------------------------------------+
-int CountMyPositions()
+//--- money per 1.0 of price distance on 0.01 lot (XAUUSD: $1)
+double MoneyPerUnit001()
   {
-   int cnt = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
-      ulong tk = PositionGetTicket(i);
-      if(tk == 0)
-         continue;
-      if(PositionGetString(POSITION_SYMBOL) == _Symbol && PositionGetInteger(POSITION_MAGIC) == InpMagic)
-         cnt++;
-     }
-   return(cnt);
+   double tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double ts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   return((ts > 0 && tv > 0) ? tv / ts * 0.01 : 1.0);
   }
 
+void CoreOnTradeClosed(ulong ticket, double money, double volume, datetime closeTimeServer)
+  {
+   g_eaPnl += money;
+   g_eaHwm = MathMax(g_eaHwm, g_eaPnl);
+   int k = PosIndex(ticket);
+   if(k >= 0 && InpLearnFromTrades && g_posSigT[k] > 0 && volume > 0)
+     {
+      double pnl001 = money / (volume / 0.01) / MathMax(MoneyPerUnit001(), 1e-9);
+      ArrayResize(g_F, g_nF + 1);
+      g_F[g_nF].t = g_posSigT[k];
+      g_F[g_nF].dir = g_posSigDir[k];
+      g_F[g_nF].pnl = pnl001;
+      g_F[g_nF].te = ToNY7(closeTimeServer);
+      g_nF++;
+      ApplyFeedback();
+      if(UseFiles())
+         SaveMemory();
+     }
+   if(k >= 0)
+      ForgetPosition(ticket);
+  }
+
+//+------------------------------------------------------------------+
+//| Money management + smooth recovery                               |
+//+------------------------------------------------------------------+
 double NormalizeLot(double lot)
   {
    double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
@@ -1187,382 +1274,226 @@ double NormalizeLot(double lot)
    return(NormalizeDouble(lot, 2));
   }
 
-double CalcLot(int dir)
+double BaseLot()
   {
    double bal = AccountInfoDouble(ACCOUNT_BALANCE);
    if(InpLotMode == LOT_FIXED)
-      return(NormalizeLot(InpFixedLot));
+      return(InpFixedLot);
    if(InpLotMode == LOT_PER_BALANCE)
-      return(NormalizeLot(0.01 * MathFloor(bal / MathMax(InpBalancePer001, 1.0))));
+      return(MathMax(0.01, 0.01 * MathFloor(bal / MathMax(InpBalancePer001, 1.0))));
    //--- risk mode: money lost at the hard stop for 1.0 lot
-   double price = (dir > 0) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double loss1 = 0;
-   ENUM_ORDER_TYPE ot = (dir > 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   if(!OrderCalcProfit(ot, _Symbol, 1.0, price, price - dir * InpStopLossUSD, loss1) || loss1 >= 0)
-      return(NormalizeLot(InpFixedLot));
-   double risk = bal * InpRiskPercent / 100.0;
-   return(NormalizeLot(risk / MathAbs(loss1)));
+   double ts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   if(ts <= 0 || tv <= 0)
+      return(InpFixedLot);
+   double loss1 = InpStopLossUSD / ts * tv;
+   return(bal * InpRiskPercent / 100.0 / loss1);
   }
 
-bool DailyLossHit()
+//--- deficit of this EA under its high-water mark, spread over K future trades (capped multiplier)
+double RecoveryMultiplier(double baseLot)
   {
-   if(InpDailyLossPct <= 0)
-      return(false);
-   double eq = AccountInfoDouble(ACCOUNT_EQUITY);
-   return(eq < g_dayStartBalance * (1.0 - InpDailyLossPct / 100.0));
-  }
-
-bool EquityStopHit()
-  {
-   if(InpEquityStopPct <= 0)
-      return(false);
-   double eq = AccountInfoDouble(ACCOUNT_EQUITY);
-   return(eq < g_peakEquity * (1.0 - InpEquityStopPct / 100.0));
-  }
-
-void RememberPosition(ulong ticket, double peak, datetime sigT, int sigDir)
-  {
-   int n = ArraySize(g_posTicket);
-   for(int i = 0; i < n; i++)
-      if(g_posTicket[i] == ticket)
-         return;
-   ArrayResize(g_posTicket, n + 1);
-   ArrayResize(g_posPeak, n + 1);
-   ArrayResize(g_posSigT, n + 1);
-   ArrayResize(g_posSigDir, n + 1);
-   g_posTicket[n] = ticket;
-   g_posPeak[n] = peak;
-   g_posSigT[n] = sigT;
-   g_posSigDir[n] = sigDir;
-  }
-
-int PosIndex(ulong ticket)
-  {
-   for(int i = ArraySize(g_posTicket) - 1; i >= 0; i--)
-      if(g_posTicket[i] == ticket)
-         return(i);
-   return(-1);
-  }
-
-//+------------------------------------------------------------------+
-//| Adaptive Profit Shield: runs on every tick                       |
-//+------------------------------------------------------------------+
-void ManagePositions()
-  {
-   if(!g_trailOn)
-      return;
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double pt  = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double stopLvl = (SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) + 1) * pt;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-     {
-      ulong tk = PositionGetTicket(i);
-      if(tk == 0)
-         continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol || PositionGetInteger(POSITION_MAGIC) != InpMagic)
-         continue;
-      long   type  = PositionGetInteger(POSITION_TYPE);
-      double open  = PositionGetDouble(POSITION_PRICE_OPEN);
-      double sl    = PositionGetDouble(POSITION_SL);
-      double tp    = PositionGetDouble(POSITION_TP);
-      double tpDist = (tp > 0) ? MathAbs(tp - open) : InpTakeProfitUSD;
-      int k = PosIndex(tk);
-      if(k < 0)
-        {
-         //--- position from a previous session: rebuild the peak from the stop
-         double pk = (type == POSITION_TYPE_BUY) ? MathMax(bid, (sl > open) ? sl + g_dist : bid)
-                                                  : MathMin(ask, (sl > 0 && sl < open) ? sl - g_dist : ask);
-         RememberPosition(tk, pk, 0, 0);
-         k = PosIndex(tk);
-        }
-      if(type == POSITION_TYPE_BUY)
-        {
-         if(bid > g_posPeak[k])
-            g_posPeak[k] = bid;
-         double prof = g_posPeak[k] - open;
-         if(prof < g_act)
-            continue;
-         double d = (prof >= InpTightenAt * tpDist) ? g_dist * InpTightenK : g_dist;
-         double ns = MathMax(g_posPeak[k] - d, open + g_lock);
-         ns = MathMin(ns, bid - stopLvl);
-         ns = NormalizeDouble(ns, _Digits);
-         if(ns >= sl + InpTrailStepUSD - 1e-9 && ns > open)
-            if(!trade.PositionModify(tk, ns, tp) && InpVerbose)
-               Print("CortexML: modify failed ", trade.ResultRetcode());
-        }
-      else
-        {
-         if(ask < g_posPeak[k])
-            g_posPeak[k] = ask;
-         double prof = open - g_posPeak[k];
-         if(prof < g_act)
-            continue;
-         double d = (prof >= InpTightenAt * tpDist) ? g_dist * InpTightenK : g_dist;
-         double ns = MathMin(g_posPeak[k] + d, open - g_lock);
-         ns = MathMax(ns, ask + stopLvl);
-         ns = NormalizeDouble(ns, _Digits);
-         if((sl <= 0 || ns <= sl - InpTrailStepUSD + 1e-9) && ns < open)
-            if(!trade.PositionModify(tk, ns, tp) && InpVerbose)
-               Print("CortexML: modify failed ", trade.ResultRetcode());
-        }
-     }
+   if(!InpRecovery || baseLot <= 0)
+      return(1.0);
+   double deficit = g_eaHwm - g_eaPnl;
+   if(deficit <= 0)
+      return(1.0);
+   double deficit001 = deficit / ((baseLot / 0.01) * MathMax(MoneyPerUnit001(), 1e-9));
+   double mult = 1.0 + deficit001 / (MathMax(InpRecoveryTrades, 1.0) * MathMax(InpRecoveryUnitUSD, 0.5));
+   mult = MathMin(mult, MathMax(1.0, InpRecoveryMaxMult));
+   return(MathRound(mult * 100.0) / 100.0);
   }
 
 //+------------------------------------------------------------------+
 //| Signal evaluation on every closed M15 bar                        |
 //+------------------------------------------------------------------+
-void OnNewBar()
+struct CortexSignal
+  {
+   int               dir;
+   int               tier;     // 0 core, 1 ML tier, 2 session tier
+   double            p;
+   double            base;
+   double            dm;
+   double            tp;
+   datetime          sigT;     // signal bar start (NY+7 clock)
+  };
+
+string TierName(int tier)
+  {
+   if(tier == 0)
+      return("core");
+   if(tier == 1)
+      return("ML tier");
+   return("session tier");
+  }
+
+//--- activity governor: after InpIdleDays without entries the ML margins relax linearly
+double IdleRelax()
+  {
+   if(InpIdleDays <= 0)
+      return(0);
+   datetime ref = (g_lastEntry > InpTradeStart) ? g_lastEntry : InpTradeStart;   // warm-up does not count as idle
+   double idle = (double)(TimeCurrent() - ref) / 86400.0;
+   double r = (idle - InpIdleDays) / MathMax(InpIdleSpanDays, 0.1);
+   return(MathMax(0.0, MathMin(1.0, r)) * InpIdleRelax);
+  }
+
+//--- returns true when the model wants a trade (platform filters are applied by the wrapper)
+bool CoreEvaluate(CortexSignal &sig)
   {
    datetime now = TimeCurrent();
    MqlDateTime s;
    TimeToStruct(now, s);
-   //--- monthly re-training on the rolling window (past + newest resolved data)
+   //--- monthly re-training on the rolling window (past + newest resolved data + real results)
    if(s.year * 12 + s.mon != g_trainMonth)
       Train();
-   //--- live window
    if(!LoadSet(now - 40 * 86400, now, g_m15, g_h1, g_h4, g_d1))
-      return;
+      return(false);
    int i = g_m15.LastClosed(ToNY7(now));
    if(i < 112)
-      return;
+      return(false);
    double dmRaw = 0;
    if(!DayMove(g_m15, g_d1, i, dmRaw))
-      return;
-   int dir = (dmRaw > 0) ? 1 : -1;
-   double dm = MathAbs(dmRaw);
+      return(false);
    g_lastDM = dmRaw;
-   g_lastDir = dir;
-   double hr = ServerHour(g_m15.t[i]);
-   if(hr < InpHourFrom || hr >= InpHourTo)
+   if(!InTradingHours(g_m15.t[i]))
      {
       g_lastDecision = "outside trading hours";
-      return;
+      return(false);
      }
-   if(dm <= InpMinDayMove)
-     {
-      g_lastDecision = StringFormat("day move %.2f ATR: no momentum", dmRaw);
-      return;
-     }
+   double relax = IdleRelax();
    double x[NF];
    double tpUsed = InpTakeProfitUSD;
-   if(!MakeFeatures(g_m15, g_h1, g_h4, g_d1, i, dir, x, tpUsed))
+   sig.sigT = g_m15.t[i];
+   //--- tier 0/1: strong or moderate day move in the day's direction
+   if(MathAbs(dmRaw) > InpMinDayMove)
      {
-      g_lastDecision = "not enough bars for features";
-      return;
+      int dir = (dmRaw > 0) ? 1 : -1;
+      double dm = MathAbs(dmRaw);
+      if(!MakeFeatures(g_m15, g_h1, g_h4, g_d1, i, dir, x, tpUsed))
+        {
+         g_lastDecision = "not enough bars for features";
+         return(false);
+        }
+      double p = Predict(0, x);
+      bool take;
+      int tier = (dm >= InpCoreDayMove) ? 0 : 1;
+      if(g_modelOk[0])
+        {
+         double e = p - g_base[0];
+         g_lastE = e;
+         if(tier == 0)
+            take = (e > -InpCoreVeto);
+         else
+            take = (e > MathMax(InpMLMargin - relax, 0.0));
+        }
+      else
+        {
+         g_lastE = 0;
+         take = (tier == 0);
+        }
+      g_lastP = p;
+      if(!take)
+        {
+         g_lastDecision = StringFormat("%s %s skipped (p=%.3f, base=%.3f)", TierName(tier), dir > 0 ? "BUY" : "SELL", p, g_base[0]);
+         return(false);
+        }
+      sig.dir = dir;
+      sig.tier = tier;
+      sig.p = p;
+      sig.base = g_base[0];
+      sig.dm = dmRaw;
+      sig.tp = tpUsed;
+      return(true);
      }
-   double p = Predict(x);
-   g_lastP = p;
-   bool take;
-   if(g_modelOk)
+   //--- tier 2: quiet day, strong 6h / 24h session move, separate model
+   if(!InpUseSessionTier || !g_modelOk[1])
      {
-      g_lastE = p - g_base;
-      take = (dm >= InpCoreDayMove) ? (g_lastE > -InpCoreVeto) : (g_lastE > InpMLMargin);
+      g_lastDecision = StringFormat("day move %.2f ATR: no momentum", dmRaw);
+      return(false);
      }
-   else
+   double r6 = 0, r24 = 0;
+   if(!SessionMoves(g_m15, g_h1, i, r6, r24))
+      return(false);
+   double bestE = -1, bestP = -1, bestTp = InpTakeProfitUSD;
+   int bestDir = 0;
+   for(int q = -1; q <= 1; q += 2)
      {
-      g_lastE = 0;
-      take = (dm >= InpCoreDayMove);
+      if(!SessionTrigger(r6, r24, q))
+         continue;
+      if(!MakeFeatures(g_m15, g_h1, g_h4, g_d1, i, q, x, tpUsed))
+         continue;
+      double p = Predict(1, x);
+      double e = p - g_base[1];
+      if(bestDir == 0 || e > bestE)
+        {
+         bestE = e;
+         bestP = p;
+         bestDir = q;
+         bestTp = tpUsed;
+        }
      }
-   string tier = (dm >= InpCoreDayMove) ? "core" : "ML tier";
-   if(!take)
+   if(bestDir == 0)
      {
-      g_lastDecision = StringFormat("%s %s skipped (p=%.3f, base=%.3f)", tier, dir > 0 ? "BUY" : "SELL", p, g_base);
-      return;
+      g_lastDecision = StringFormat("day move %.2f ATR, no session impulse", dmRaw);
+      return(false);
      }
-   //--- execution filters
+   g_lastP = bestP;
+   g_lastE = bestE;
+   if(bestE <= MathMax(InpSessMargin - relax, 0.0))
+     {
+      g_lastDecision = StringFormat("session tier %s skipped (p=%.3f, base=%.3f)", bestDir > 0 ? "BUY" : "SELL", bestP, g_base[1]);
+      return(false);
+     }
+   sig.dir = bestDir;
+   sig.tier = 2;
+   sig.p = bestP;
+   sig.base = g_base[1];
+   sig.dm = dmRaw;
+   sig.tp = bestTp;
+   return(true);
+  }
+
+//--- common execution filters (time based); position / spread checks are done by the wrapper
+bool CoreTimeFilters(CortexSignal &sig)
+  {
+   datetime now = TimeCurrent();
    if(now < InpTradeStart)
      {
       g_lastDecision = "warm-up: trading starts " + TimeToString(InpTradeStart, TIME_DATE);
-      return;
+      return(false);
      }
    MqlDateTime sb;
-   TimeToStruct(g_m15.t[i] + 900, sb);
+   TimeToStruct(sig.sigT + 900, sb);
    if(sb.day_of_week == 5 && sb.hour >= InpFridayLastHour)
-      return;
-   if(CountMyPositions() >= InpMaxPositions)
-      return;
+     {
+      g_lastDecision = "Friday cut-off";
+      return(false);
+     }
    if(InpMinMinutesGap > 0 && now - g_lastEntry < InpMinMinutesGap * 60)
-      return;
-   if(DailyLossHit() || EquityStopHit())
-     {
-      g_lastDecision = "protection: loss limit reached";
-      return;
-     }
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   if(ask - bid > InpMaxSpreadUSD)
-     {
-      g_lastDecision = StringFormat("spread %.2f too wide", ask - bid);
-      return;
-     }
-   double lot = CalcLot(dir);
-   bool ok;
-   if(dir > 0)
-      ok = trade.Buy(lot, _Symbol, ask, NormalizeDouble(ask - InpStopLossUSD, _Digits),
-                     NormalizeDouble(ask + tpUsed, _Digits), InpComment);
-   else
-      ok = trade.Sell(lot, _Symbol, bid, NormalizeDouble(bid + InpStopLossUSD, _Digits),
-                      NormalizeDouble(bid - tpUsed, _Digits), InpComment);
-   if(ok && (trade.ResultRetcode() == TRADE_RETCODE_DONE || trade.ResultRetcode() == TRADE_RETCODE_PLACED))
-     {
-      g_lastEntry = now;
-      ulong deal = trade.ResultDeal();
-      ulong posId = 0;
-      if(deal > 0 && HistoryDealSelect(deal))
-         posId = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
-      if(posId > 0)
-         RememberPosition(posId, (dir > 0) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK),
-                          g_m15.t[i], dir);
-      g_lastDecision = StringFormat("%s %s opened %.2f lot (p=%.3f, base=%.3f, day %.2f ATR)",
-                                    tier, dir > 0 ? "BUY" : "SELL", lot, p, g_base, dmRaw);
-      if(InpVerbose)
-         Print("CortexML: ", g_lastDecision);
-     }
-   else
-      g_lastDecision = "order rejected: " + IntegerToString((int)trade.ResultRetcode());
+      return(false);
+   return(true);
+  }
+
+void CoreOnEntry(CortexSignal &sig, double lot, double mult)
+  {
+   g_lastEntry = TimeCurrent();
+   g_lastMult = mult;
+   g_lastDecision = StringFormat("%s %s opened %.2f lot (x%.2f) p=%.3f base=%.3f day %.2f ATR",
+                                 TierName(sig.tier), sig.dir > 0 ? "BUY" : "SELL", lot, mult, sig.p, sig.base, sig.dm);
+   if(InpVerbose)
+      Print("CortexML: ", g_lastDecision);
   }
 
 //+------------------------------------------------------------------+
-//| Real trade results -> learning feedback                          |
+//| Account protection                                               |
 //+------------------------------------------------------------------+
-void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
-  {
-   if(trans.type != TRADE_TRANSACTION_DEAL_ADD || !InpLearnFromTrades)
-      return;
-   if(!HistoryDealSelect(trans.deal))
-      return;
-   if(HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != InpMagic)
-      return;
-   if(HistoryDealGetString(trans.deal, DEAL_SYMBOL) != _Symbol)
-      return;
-   long entry = HistoryDealGetInteger(trans.deal, DEAL_ENTRY);
-   if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY)
-      return;
-   ulong posId = (ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
-   int k = PosIndex(posId);
-   if(k < 0 || g_posSigT[k] == 0)
-      return;
-   double vol = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
-   if(vol <= 0)
-      return;
-   //--- whole position result: profit + swap + commissions of the entry and exit deals
-   double money = 0;
-   if(HistorySelectByPosition(posId))
-     {
-      for(int d = HistoryDealsTotal() - 1; d >= 0; d--)
-        {
-         ulong dt = HistoryDealGetTicket(d);
-         if(dt == 0)
-            continue;
-         money += HistoryDealGetDouble(dt, DEAL_PROFIT) + HistoryDealGetDouble(dt, DEAL_COMMISSION) +
-                  HistoryDealGetDouble(dt, DEAL_SWAP);
-        }
-     }
-   else
-      money = HistoryDealGetDouble(trans.deal, DEAL_PROFIT) + HistoryDealGetDouble(trans.deal, DEAL_COMMISSION) +
-              HistoryDealGetDouble(trans.deal, DEAL_SWAP);
-   //--- convert account money into "$ per 0.01 lot" with the symbol's own tick value
-   double tv = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double ts = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   double perUnit = (ts > 0) ? tv / ts * 0.01 : 1.0;    // money per 1.0 price unit on 0.01 lot
-   double pnl001 = money / (vol / 0.01) / MathMax(perUnit, 1e-9);
-   ArrayResize(g_F, g_nF + 1);
-   g_F[g_nF].t = g_posSigT[k];
-   g_F[g_nF].dir = g_posSigDir[k];
-   g_F[g_nF].pnl = pnl001;
-   g_F[g_nF].te = ToNY7((datetime)HistoryDealGetInteger(trans.deal, DEAL_TIME));
-   g_nF++;
-   ApplyFeedback();
-   if(UseFiles())
-      SaveMemory();
-  }
+double g_dayStartBalance = 0;
+int    g_dayKey = -1;
+double g_peakEquity = 0;
 
-//+------------------------------------------------------------------+
-//| Panel                                                            |
-//+------------------------------------------------------------------+
-void DrawPanel()
+void CoreBookkeeping()
   {
-   if(!InpShowPanel)
-      return;
-   string mdl = g_modelOk ? StringFormat("online logistic | %d samples | base win %.1f%% | trained %s",
-                                         g_trainN, 100 * g_base, TimeToString(g_trainedAt, TIME_DATE))
-                          : StringFormat("collecting history (%d / %d samples) - core rule active", g_trainN, InpMinSamples);
-   string regime = "flat";
-   if(MathAbs(g_lastDM) >= InpCoreDayMove)
-      regime = (g_lastDM > 0) ? "strong bullish day" : "strong bearish day";
-   else
-      if(MathAbs(g_lastDM) >= InpMinDayMove)
-         regime = (g_lastDM > 0) ? "bullish drift" : "bearish drift";
-   string txt = "CORTEX ML AI  |  Quantix Engineering\n";
-   txt += "Model: " + mdl + "\n";
-   txt += StringFormat("Day move: %+.2f daily ATR (%s)\n", g_lastDM, regime);
-   txt += StringFormat("Last score: p=%.3f  edge=%+.3f\n", g_lastP, g_lastE);
-   txt += "Decision: " + g_lastDecision + "\n";
-   txt += StringFormat("Exits: SL %.1f | TP %.1f | Shield start %.1f lock %.1f dist %.1f\n",
-                       InpStopLossUSD, InpTakeProfitUSD, g_act, g_lock, g_dist);
-   txt += StringFormat("Open positions: %d / %d   real results learned: %d", CountMyPositions(), InpMaxPositions, g_nF);
-   Comment(txt);
-  }
-
-//+------------------------------------------------------------------+
-//| Expert lifecycle                                                 |
-//+------------------------------------------------------------------+
-int OnInit()
-  {
-   g_shiftZero = (InpServerGMTWinter == 2 && InpServerUsDst);
-   switch(InpTrailProfile)
-     {
-      case TRAIL_SHIELD:
-         g_act = 5.0;
-         g_lock = 4.0;
-         g_dist = 3.0;
-         break;
-      case TRAIL_BALANCED:
-         g_act = 6.0;
-         g_lock = 4.0;
-         g_dist = 3.0;
-         break;
-      case TRAIL_RUNNER:
-         g_act = 8.0;
-         g_lock = 5.0;
-         g_dist = 3.0;
-         break;
-      default:
-         g_act = InpTrailStartUSD;
-         g_lock = MathMax(3.0, InpTrailLockUSD);
-         g_dist = InpTrailDistUSD;
-     }
-   g_trailOn = (InpTrailProfile != TRAIL_OFF);
-   if(g_trailOn && g_lock >= g_act)
-     {
-      Print("CortexML: trailing lock must be below the activation profit");
-      return(INIT_PARAMETERS_INCORRECT);
-     }
-   if(InpStopLossUSD <= 0 || InpTakeProfitUSD <= 0 || InpTPMinUSD > InpTPMaxUSD)
-      return(INIT_PARAMETERS_INCORRECT);
-   trade.SetExpertMagicNumber((ulong)InpMagic);
-   trade.SetDeviationInPoints(50);
-   trade.SetTypeFillingBySymbol(_Symbol);
-   g_dayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-   g_peakEquity = AccountInfoDouble(ACCOUNT_EQUITY);
-   if(UseFiles())
-      FolderCreate("CortexML", FILE_COMMON);
-   LoadMemory();
-   Train();
-   DrawPanel();
-   return(INIT_SUCCEEDED);
-  }
-
-void OnDeinit(const int reason)
-  {
-   SaveMemory();
-   Comment("");
-  }
-
-void OnTick()
-  {
-   //--- day bookkeeping for the protection block
    MqlDateTime s;
    TimeToStruct(TimeCurrent(), s);
    int dk = s.year * 400 + s.day_of_year;
@@ -1572,24 +1503,52 @@ void OnTick()
       g_dayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
      }
    g_peakEquity = MathMax(g_peakEquity, AccountInfoDouble(ACCOUNT_EQUITY));
-   ManagePositions();
-   datetime bar = iTime(_Symbol, PERIOD_M15, 0);
-   if(bar != 0 && bar != g_lastBar)
-     {
-      g_lastBar = bar;
-      OnNewBar();
-      DrawPanel();
-     }
   }
 
-double OnTester()
+bool CoreProtectionHit()
   {
-   //--- custom criterion: profit factor weighted by the number of trades (penalises tiny samples)
-   double pf = TesterStatistics(STAT_PROFIT_FACTOR);
-   double n  = TesterStatistics(STAT_TRADES);
-   double dd = TesterStatistics(STAT_EQUITY_DDREL_PERCENT);
-   if(n < 30)
-      return(0);
-   return(pf * MathSqrt(n) / MathMax(1.0, dd));
+   double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(InpDailyLossPct > 0 && eq < g_dayStartBalance * (1.0 - InpDailyLossPct / 100.0))
+     {
+      g_lastDecision = "protection: daily loss limit";
+      return(true);
+     }
+   if(InpEquityStopPct > 0 && eq < g_peakEquity * (1.0 - InpEquityStopPct / 100.0))
+     {
+      g_lastDecision = "protection: equity stop";
+      return(true);
+     }
+   return(false);
   }
+
+//+------------------------------------------------------------------+
+//| Panel                                                            |
+//+------------------------------------------------------------------+
+void DrawPanel()
+  {
+   if(!InpShowPanel)
+      return;
+   string m0 = g_modelOk[0] ? StringFormat("ON n=%d base %.1f%%", g_trainN[0], 100 * g_base[0])
+                            : StringFormat("learning %d/%d (core rule active)", g_trainN[0], InpMinSamples);
+   string m1 = g_modelOk[1] ? StringFormat("ON n=%d base %.1f%%", g_trainN[1], 100 * g_base[1])
+                            : StringFormat("learning %d/%d", g_trainN[1], InpMinSamples);
+   string regime = "quiet day";
+   if(MathAbs(g_lastDM) >= InpCoreDayMove)
+      regime = (g_lastDM > 0) ? "strong bullish day" : "strong bearish day";
+   else
+      if(MathAbs(g_lastDM) > InpMinDayMove)
+         regime = (g_lastDM > 0) ? "bullish drift" : "bearish drift";
+   double deficit = g_eaHwm - g_eaPnl;
+   string txt = "CORTEX ML AI " + CORTEX_VERSION + "  |  Quantix Engineering\n";
+   txt += "Day model: " + m0 + "   Session model: " + m1 + "\n";
+   txt += "Last training: " + TimeToString(g_trainedAt, TIME_DATE) + StringFormat("   idle relax: %.3f\n", IdleRelax());
+   txt += StringFormat("Day move: %+.2f daily ATR (%s)\n", g_lastDM, regime);
+   txt += StringFormat("Last score: p=%.3f  edge=%+.3f\n", g_lastP, g_lastE);
+   txt += "Decision: " + g_lastDecision + "\n";
+   txt += StringFormat("Shield: SL %.1f | TP %.1f | start %.1f lock %.1f dist %.1f\n", InpStopLossUSD, InpTakeProfitUSD, g_act, g_lock, g_dist);
+   txt += StringFormat("Recovery: %s  deficit %.2f  next lot x%.2f\n", InpRecovery ? "ON" : "off", MathMax(deficit, 0.0), RecoveryMultiplier(BaseLot()));
+   txt += StringFormat("Open positions: %d / %d   real results learned: %d", PlatformCountPositions(), InpMaxPositions, g_nF);
+   Comment(txt);
+  }
+
 //+------------------------------------------------------------------+

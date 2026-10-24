@@ -1,9 +1,13 @@
-; Cortex ML AI preset - CortexML_Default_Shield
+; Cortex ML AI 1.10 preset
 InpLotMode=0
 InpFixedLot=0.01
 InpBalancePer001=1000.0
 InpRiskPercent=1.0
 InpMaxLot=5.0
+InpRecovery=false
+InpRecoveryTrades=15.0
+InpRecoveryMaxMult=1.5
+InpRecoveryUnitUSD=6.0
 InpStopLossUSD=30.0
 InpTPMode=0
 InpTakeProfitUSD=13.5
@@ -18,6 +22,9 @@ InpTightenK=0.6
 InpTrailStepUSD=0.5
 InpCoreDayMove=1.0
 InpMinDayMove=0.6
+InpUseSessionTier=false
+InpSessMove6=3.0
+InpSessMove24=7.0
 InpHourFrom=8
 InpHourTo=23
 InpMaxPositions=1
@@ -29,6 +36,10 @@ InpMinSamples=300
 InpRegC=0.05
 InpCoreVeto=0.03
 InpMLMargin=0.04
+InpSessMargin=0.04
+InpIdleDays=0
+InpIdleSpanDays=2.0
+InpIdleRelax=0.04
 InpLabelSpreadUSD=0.25
 InpCommissionPerLot=7.0
 InpLearnFromTrades=true
